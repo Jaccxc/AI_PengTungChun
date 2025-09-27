@@ -1,5 +1,5 @@
 """
-Main PySide6 GUI window for the Claude Debugger.
+Main PySide6 GUI window for the Fixit.
 """
 import asyncio
 import logging
@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Main GUI window for the Claude Debugger."""
+    """Main GUI window for the Fixit."""
 
     def __init__(self):
         """Initialize the main window."""
         super().__init__()
 
-        self.setWindowTitle("Claude Debugger")
+        self.setWindowTitle("Fixit")
         self.setGeometry(100, 100, 1400, 900)
         self.setMinimumSize(1200, 700)
 
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(24)
 
         # Header
-        header = QLabel("Claude Debugger")
+        header = QLabel("Fixit")
         header.setStyleSheet(f"""
             QLabel {{
                 color: {self.colors['text_primary']};
@@ -470,7 +470,7 @@ class MainWindow(QMainWindow):
         """)
 
         # Add welcome message with better formatting
-        welcome_msg = """Welcome to Claude Debugger
+        welcome_msg = """Welcome to Fixit
 
 🤖 Automated debugging powered by Claude Code
 📋 Ready to process your debugging tasks
