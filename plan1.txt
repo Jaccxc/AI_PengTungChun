@@ -1,0 +1,530 @@
+below is an dev plan.
+
+you have to implement the code for below system.
+
+
+
+
+# Claude Debugger — Full Skeleton Report (Windows, Poetry, GUI, CLI-driven)
+
+A Windows-first Python app (Poetry-run, Tkinter GUI) that turns “to-do”-like items into a **three-stage Claude Code pipeline**. The app **only manages prompting**; **all code execution, file edits, and test runs are performed by the Claude CLI**.
+
+> **CLI contract (required):** every invocation uses
+> `claude --dangerously-skip-permisstions "<prompt>"`
+> (spelling as provided). The app runs the CLI **in the project root**.
+
+---
+
+## 0) Goals, Non-Goals, Constraints
+
+**Goals**
+
+* Lightweight GUI to collect tasks: **project root** + **description** (bug or feature test).
+* Background worker that:
+
+  1. **Scope & Report** (no edits) → `step1.md`
+  2. **Generate failing tests** under `<root>/test_bugfix/` → `step2.md`
+  3. **Fix & run iteratively** (Claude runs `pytest`, applies edits) → `step3.md`
+* Mark task **Completed** when Claude prints sentinel `RESULT: PASS`.
+
+**Non-Goals**
+
+* No local test execution; **Claude runs everything**.
+* No repo setup/venv orchestration by the app (Claude can do it if instructed).
+* No permission prompts (always use the dangerous flag as requested).
+
+**Constraints**
+
+* **Windows 10/11**, Python **3.11+**, **Poetry**.
+* **Node + `claude` CLI** installed and authenticated (`ANTHROPIC_API_KEY` set).
+* Expected test runner: `pytest`.
+
+---
+
+## 1) High-Level Architecture
+
+```
++-------------------+          +-------------------+
+|  Tkinter GUI      | input -> |   Task Manager    | --(async)-> CLI runner
+|  - add task       |          |  - queue, status  |                |
+|  - status feed    | <---- UI events (Queue) ----+                v
++-------------------+                                             
+         |                                                       
+         | creates per-task dirs                                 
+         v                                                       
+   <project root>/.claude_tasks/item_<uuid>/{step1,2,3}.md       
+   <project root>/test_bugfix/   (tests written by Claude)       
+```
+
+**Concurrency model:** GUI runs on main thread; an **asyncio loop** in a background thread consumes a FIFO queue of `TaskItem`s. The manager shells out to `claude` with `cwd=project_root`.
+
+---
+
+## 2) UX & Workflow Spec
+
+### 2.1 GUI (Tkinter, minimal)
+
+* Left panel: **Project root picker**, **Type** (Bug / Feature Test), **Description** (multiline), **Add Task**, **Cancel All**.
+* Right panel: **Log feed** (append-only).
+  Example lines:
+  `[abc123] enqueued` / `status → RUNNING` / `step 2: Generating failing tests…` / `✅ done …`
+
+### 2.2 Task lifecycle
+
+1. **Step 1 — Scope (no edits)**
+
+   * Prompt instructs “analyze & narrow down impact; do **NOT modify files**”.
+   * Save full CLI stdout to `.claude_tasks/item_<uuid>/step1.md`.
+
+2. **Step 2 — Minimal failing tests**
+
+   * Instruct Claude to **write tests only under** `<root>/test_bugfix/`.
+   * End of output **must** include sentinel: `RESULT: TESTS_WRITTEN`.
+   * Save stdout to `step2.md`. Proceed even if sentinel missing (best-effort).
+
+3. **Step 3 — Fix & run loop (N attempts)**
+
+   * Instruct Claude to **run**: `python -m pytest "<root>/test_bugfix" -q`
+   * Apply **smallest changes**; re-run tests until green or attempts exhausted.
+   * At the **very end** print exactly: `RESULT: PASS` or `RESULT: FAIL`.
+   * Save all attempts (concatenated) to `step3.md`.
+   * If any attempt returns **PASS**, mark task **COMPLETED**; else **FAILED**.
+
+---
+
+## 3) Files & Folders
+
+```
+claude-debugger/
+├─ pyproject.toml
+├─ README.md
+├─ .gitignore
+├─ app.py                    # entrypoint (Poetry: poetry run python app.py)
+├─ gui/
+│  └─ main_window.py         # Tkinter UI
+├─ core/
+│  ├─ models.py              # TaskItem, enums
+│  ├─ manager.py             # background worker, orchestration
+│  ├─ prompts.py             # step prompts & system text
+│  └─ cli_strings.py         # canonical sentinel strings, helpers
+└─ claude/
+   └─ client.py              # CLI wrapper (always uses dangerous flag)
+```
+
+**Per-task artifacts (inside the project root):**
+
+```
+<root>/
+  ├─ test_bugfix/                      # tests created by Claude
+  └─ .claude_tasks/
+      └─ item_<uuid>/
+          ├─ step1.md
+          ├─ step2.md
+          └─ step3.md
+```
+
+---
+
+## 4) Configuration & Environment
+
+**Python**: 3.11+ (Windows Store or pyenv-win acceptable)
+**Poetry**: `pipx install poetry` (recommended)
+**Node/CLI**:
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+$env:ANTHROPIC_API_KEY="sk-..."  # required by Claude CLI
+```
+
+**pyproject.toml (essentials)**
+
+```toml
+[tool.poetry]
+name = "claude-debugger"
+version = "0.1.0"
+description = "Windows GUI that manages Claude Code debugging tasks"
+authors = ["you <you@example.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.8"
+anyio = "^4.4"
+rich = "^13.8"
+
+[tool.poetry.scripts]
+claude-debugger = "app:main"
+```
+
+**.gitignore**
+
+```
+__pycache__/
+*.pyc
+.mypy_cache/
+.env
+dist/
+build/
+*.spec
+```
+
+---
+
+## 5) Prompt Contracts (authoritative)
+
+> **All prompts are executed as:**
+> `claude --dangerously-skip-permisstions "<PROMPT_TEXT>"`
+> with `cwd` set to the **selected project root**.
+
+### 5.1 Step 1 (Scope; no edits)
+
+**System preface** (inline at top):
+
+```
+[SYSTEM]
+You are an expert codebase investigator. First understand the repository
+structure and how the described issue might manifest. Be concise; produce a focused
+report and a proposed search plan. Do NOT modify any files in this step.
+```
+
+**User content template:**
+
+```
+Task: Understand the scope and narrow the search.
+Project root: {PROJECT_ROOT}
+User description:
+{DESCRIPTION}
+
+Output:
+1) Likely impacted modules/packages
+2) How components interact with the bug/feature
+3) Shortlist of files/functions to inspect next
+4) Compact report (<= 400 tokens)
+```
+
+**Expected behavior:** No file edits; a crisp report saved to `step1.md`. No sentinel required.
+
+---
+
+### 5.2 Step 2 (Write failing tests in `test_bugfix/`)
+
+**System preface:**
+
+```
+[SYSTEM]
+You are a senior test engineer. Generate minimal failing tests that capture the intended
+behavior. Use pytest. Keep tests deterministic and small.
+```
+
+**User content template (strict constraints):**
+
+```
+Using the analysis from: {STEP1_PATH}
+Write tests ONLY under: {TESTS_DIR}
+- Use pytest; name files like test_bugfix_*.py.
+- Keep each file short and focused.
+- If project APIs are unclear, create minimal fakes/mocks.
+
+At the VERY END, print exactly one line:
+RESULT: TESTS_WRITTEN
+```
+
+**Success sentinel:** `RESULT: TESTS_WRITTEN` (tail-checked by the app).
+
+---
+
+### 5.3 Step 3 (Fix & run loop; Claude executes commands)
+
+**System preface:**
+
+```
+[SYSTEM]
+You are a surgical code fixer. Iterate: run tests, propose smallest change set, apply, re-run,
+until green or max attempts reached. Avoid irrelevant edits.
+```
+
+**User content template (per attempt):**
+
+```
+Goal: Make tests in {TESTS_DIR} pass.
+You MUST execute all commands yourself.
+
+Run tests with:
+python -m pytest "{TESTS_DIR}" -q
+
+If failing:
+- Apply the smallest possible code changes
+- Re-run tests
+- Repeat until green or attempts exhausted
+
+At the ABSOLUTE END of your output, print exactly ONE line:
+RESULT: PASS
+or
+RESULT: FAIL
+
+Attempt {ATTEMPT} of {MAX_ATTEMPTS}.
+```
+
+**Pass sentinel:** `RESULT: PASS`
+**Fail sentinel:** `RESULT: FAIL`
+**Completion rule:** first `RESULT: PASS` → **Completed**; else **Failed** after `MAX_ATTEMPTS`.
+
+---
+
+## 6) Core Implementation Sketches
+
+### 6.1 CLI wrapper (`claude/client.py`)
+
+```python
+import asyncio
+from pathlib import Path
+
+class ClaudeCLIError(Exception): ...
+
+class ClaudeClient:
+    def __init__(self, workdir: Path, exe: str = "claude"):
+        self.workdir = Path(workdir)
+        self.exe = exe
+
+    async def run(self, prompt_text: str) -> str:
+        cmd = [self.exe, "--dangerously-skip-permisstions", prompt_text]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(self.workdir),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise ClaudeCLIError((err or b"").decode(errors="ignore"))
+        return out.decode(errors="ignore")
+
+    async def run_with_sentinel(self, prompt_text: str, sentinel: str) -> tuple[str, bool]:
+        out = await self.run(prompt_text)
+        ok = any(l.strip().upper() == sentinel.upper() for l in out.splitlines()[-3:])
+        return out, ok
+```
+
+### 6.2 Manager loop (essential logic)
+
+* Pre-create: `<root>/test_bugfix/`, `<root>/.claude_tasks/item_<uuid>/`.
+* **Step 1:** `client.run(step1_prompt)` → write `step1.md`
+* **Step 2:** `client.run_with_sentinel(step2_prompt, "RESULT: TESTS_WRITTEN")` → write `step2.md`
+* **Step 3:** loop `N` attempts with `client.run_with_sentinel(step3_prompt, "RESULT: PASS")`; write `step3.md` (append logs)
+
+### 6.3 GUI eventing
+
+* UI thread posts `TaskItem` to an `asyncio.Queue` via `run_coroutine_threadsafe`.
+* Background task emits `UiEvent(kind, task_id, payload)` to a thread-safe `Queue`.
+* Tkinter polls every 150ms to flush the queue to the log window.
+
+---
+
+## 7) Error Handling & Robustness
+
+**Categories**
+
+* **CLI failure (non-zero exit):** surface `stderr` in UI; mark task `FAILED`, keep reports.
+* **Sentinel missing:** continue (Step 2 → Step 3), but add a warning to the report and UI feed.
+* **Path/permissions:** validate `project_root` exists; if not, reject at add-time.
+* **Timeouts (optional):** wrap `create_subprocess_exec` with `asyncio.wait_for` per step (e.g., 30m default).
+* **Windows quirks:** always pass exact quoted paths; avoid shell=True; keep prompts under ~100k chars.
+
+**Idempotency**
+
+* Each task uses a new `uuid` directory; re-running creates a distinct run record.
+
+---
+
+## 8) Logging & Telemetry
+
+* **Per-task reports** are the source of truth (`step1/2/3.md`).
+* **App log feed** (GUI) reflects coarse events.
+  Optional: write a rolling file log: `%LOCALAPPDATA%\ClaudeDebugger\app.log`.
+
+**Redaction policy**
+
+* Do not log secrets; if users paste credentials in descriptions, write them only to `step*.md` (which lives inside the repo) and advise cleanup.
+
+---
+
+## 9) Security Notes (given the dangerous flag)
+
+* `--dangerously-skip-permisstions` grants Claude **broad edit & exec** capabilities within `cwd`.
+  **Mitigations you should keep** (even if optional):
+
+  * Always set **cwd to the exact project root** selected by the user.
+  * In prompts, **constrain write scope** (Step 2: `test_bugfix/`).
+  * Ask Claude **not to touch virtualenv/global packages**.
+  * Consider **read-only repos** or disposable branches for experimentation.
+
+---
+
+## 10) Testing Strategy
+
+**Without calling the real CLI**:
+
+* Create a **stub `claude` executable** earlier in `PATH` that echoes canned outputs and sentinels.
+  Example PowerShell shim `claude.cmd`:
+
+  ```
+  @echo off
+  REM naive stub: print prompt then a canned RESULT
+  type CON > NUL
+  echo [STUB] ok
+  echo RESULT: PASS
+  exit /b 0
+  ```
+* Unit test the sentinel parsing, queueing, UI event pump, and report writing.
+
+**With the real CLI**:
+
+* Use a sample repo with an intentionally failing function + target tests.
+* Verify Step 2 sentinel is printed and tests are created in `test_bugfix/`.
+* Verify Step 3 loops and eventually prints `RESULT: PASS`.
+
+---
+
+## 11) Operations Playbook
+
+* **Install**
+
+  ```powershell
+  pipx install poetry
+  poetry install
+  npm install -g @anthropic-ai/claude-code
+  $env:ANTHROPIC_API_KEY="sk-..."
+  ```
+* **Run**
+
+  ```powershell
+  poetry run python app.py
+  ```
+* **Reset** (remove artifacts)
+
+  * Delete `<root>/test_bugfix/` and `<root>/.claude_tasks/` per project if needed.
+* **Common issues**
+
+  * *CLI not found*: ensure `where claude` resolves in the same shell Poetry runs.
+  * *Auth errors*: verify `ANTHROPIC_API_KEY` in the **same** terminal session.
+  * *Long paths*: enable Win long path support or keep repo path short.
+
+---
+
+## 12) Roadmap (nice-to-haves)
+
+* **Richer GUI** (PySide6): per-task pane, progress bar, cancel current attempt.
+* **Branch isolation**: auto-create a git worktree/branch per task; teach Claude to commit.
+* **Patch application helper**: accept unified diffs and apply safely; auto-revert on regressions.
+* **Timeouts, backoff, quotas**: guardrail the CLI calls in busy environments.
+* **Multi-language** runners (JS/Go/Java): add step hints/tooling contracts for non-pytest repos.
+* **Artifact panel**: show `step*.md` and created test files inline.
+
+---
+
+## 13) Minimal Code Skeleton (glue)
+
+> These snippets are ready to paste; they match the report’s contracts.
+> (You already have a fuller version, but here’s the essence.)
+
+**`core/cli_strings.py`**
+
+```python
+STEP2_SENTINEL = "RESULT: TESTS_WRITTEN"
+PASS_SENTINEL = "RESULT: PASS"
+FAIL_SENTINEL = "RESULT: FAIL"
+```
+
+**`claude/client.py`**
+
+```python
+# see §6.1 – identical
+```
+
+**`core/prompts.py`** (string builders)
+
+```python
+def step1_prompt(project_root, description):
+    return f"""[SYSTEM]
+You are an expert codebase investigator. ... Do NOT modify any files in this step.
+
+Task: Understand the scope and narrow the search.
+Project root: {project_root}
+User description:
+{description}
+
+Output:
+1) Likely impacted modules/packages
+2) Interactions
+3) Shortlist
+4) Compact report (<= 400 tokens)
+"""
+
+def step2_prompt(step1_path, tests_dir):
+    return f"""[SYSTEM]
+You are a senior test engineer. Generate minimal failing tests...
+
+Using analysis from: {step1_path}
+Write tests ONLY under: {tests_dir}
+...
+At the VERY END, print exactly one line:
+RESULT: TESTS_WRITTEN
+"""
+
+def step3_prompt(tests_dir, attempt, max_attempts):
+    return f"""[SYSTEM]
+You are a surgical code fixer. Iterate...
+
+Goal: Make tests in {tests_dir} pass.
+You MUST execute all commands yourself.
+Run: python -m pytest "{tests_dir}" -q
+...
+At the ABSOLUTE END print ONE line: RESULT: PASS or RESULT: FAIL
+
+Attempt {attempt} of {max_attempts}.
+"""
+```
+
+**`core/manager.py`** (core loop outline)
+
+```python
+async def _process_item(self, item):
+    pr = item.project_root.resolve()
+    tests = pr / "test_bugfix"
+    rep = pr / ".claude_tasks" / f"item_{item.id.hex}"
+    for p in (tests, rep): p.mkdir(parents=True, exist_ok=True)
+    s1, s2, s3 = rep/"step1.md", rep/"step2.md", rep/"step3.md"
+
+    cli = ClaudeClient(pr)
+
+    out1 = await cli.run(step1_prompt(str(pr), item.description))
+    s1.write_text(out1, encoding="utf-8")
+
+    out2, _ = await cli.run_with_sentinel(step2_prompt(str(s1), str(tests)), STEP2_SENTINEL)
+    s2.write_text(out2, encoding="utf-8")
+
+    attempts, logs, passed = 0, [], False
+    while attempts < self.max_attempts:
+        attempts += 1
+        out3, ok = await cli.run_with_sentinel(
+            step3_prompt(str(tests), attempts, self.max_attempts),
+            PASS_SENTINEL
+        )
+        logs.append(f"--- Attempt {attempts} ---\n{out3}\n")
+        if ok: passed = True; break
+    s3.write_text("".join(logs), encoding="utf-8")
+    item.status = TaskStatus.COMPLETED if passed else TaskStatus.FAILED
+```
+
+---
+
+## 14) Acceptance Checklist
+
+* [ ] GUI can add tasks and shows live status lines.
+* [ ] Step 1 writes **report** to `step1.md` without edits.
+* [ ] Step 2 writes tests **under `test_bugfix/`** and ends with `RESULT: TESTS_WRITTEN`.
+* [ ] Step 3 loops, **Claude runs pytest**, prints `RESULT: PASS/FAIL`.
+* [ ] On PASS → task marked **Completed**; else **Failed** after N tries.
+* [ ] All artifacts saved under `.claude_tasks/item_<uuid>/`.
+
+---
+
+This is the complete skeleton report: architecture, UX, prompt contracts, file layout, implementation sketches, runbook, and acceptance criteria. If you want, I can now generate the full repository with these files and working stubs.

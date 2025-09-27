@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.mypy_cache/
+.env
+dist/
+build/
+*.spec
+.claude_tasks/
+test_bugfix/
