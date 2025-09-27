@@ -46,25 +46,26 @@ class ClaudeClient:
         Raises:
             ClaudeCLIError: If the command fails
         """
-        # Use the .cmd shim instead of .ps1
         cmd = [
             r"C:\Users\wow gaming\AppData\Roaming\npm\claude.cmd",
-            "--dangerously-skip-permissions",   # make sure this matches the real CLI spelling
-            prompt_text
+            "--dangerously-skip-permissions"
         ]
 
         print(f"executing claude command: {cmd}")
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                r"C:\Users\wow gaming\AppData\Roaming\npm\claude.cmd",
-                "--dangerously-skip-permissions",
-                cwd=str(self.workdir),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(self.workdir),
+                    stdin=asyncio.subprocess.PIPE,   # 👈 allow sending prompt via stdin
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                ),
+                timeout=timeout
             )
 
+            # send the prompt and wait for output
             out, err = await proc.communicate(input=prompt_text.encode("utf-8"))
 
             if proc.returncode != 0:
@@ -73,12 +74,13 @@ class ClaudeClient:
                     f"Claude CLI failed with exit code {proc.returncode}: {error_msg}"
                 )
 
-            return out.decode(errors="ignore")
+            return (out or b"").decode("utf-8", errors="ignore")
 
         except asyncio.TimeoutError:
             raise ClaudeCLIError(f"Claude CLI command timed out after {timeout} seconds")
         except Exception as e:
             raise ClaudeCLIError(f"Failed to execute Claude CLI: {str(e)}")
+
 
     async def run_with_sentinel(self, prompt_text: str, sentinel: str, timeout: int = 1800) -> Tuple[str, bool]:
         """

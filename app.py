@@ -5,6 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
+from PySide6.QtWidgets import QApplication
 from gui import MainWindow
 
 
@@ -34,9 +35,17 @@ def main():
     logger.info("Starting Claude Debugger...")
 
     try:
-        # Create and run the main window
-        app = MainWindow()
-        app.run()
+        # Create QApplication
+        app = QApplication(sys.argv)
+        app.setApplicationName("Claude Debugger")
+        app.setApplicationVersion("0.1.0")
+
+        # Create and show the main window
+        window = MainWindow()
+        window.show()
+
+        # Run the application
+        sys.exit(app.exec())
 
     except KeyboardInterrupt:
         logger.info("Application interrupted by user")
